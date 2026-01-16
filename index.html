@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Core Inspector Engine</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-vsc-dark-plus.min.css" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --ui-bg: #0d1117;
+            --sidebar-bg: #161b22;
+            --active-bg: #21262d;
+            --border-ui: #30363d;
+            --accent: #58a6ff;
+            --text: #c9d1d9;
+            --f-mono: 'JetBrains Mono', 'Fira Code', monospace;
+        }
+
+        body { margin: 0; background: var(--ui-bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+        
+        header { height: 48px; background: var(--sidebar-bg); border-bottom: 1px solid var(--border-ui); display: flex; align-items: center; padding: 0 16px; gap: 12px; }
+        .input-proxy { flex: 1; display: flex; background: var(--ui-bg); border: 1px solid var(--border-ui); border-radius: 6px; padding: 4px; }
+        input { flex: 1; background: transparent; border: none; color: var(--accent); padding: 4px 12px; font-family: var(--f-mono); font-size: 13px; }
+        button { background: var(--accent); color: #fff; border: none; padding: 5px 15px; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer; }
+        
+        main { display: flex; flex: 1; overflow: hidden; }
+        #sidebar { width: 300px; background: var(--sidebar-bg); border-right: 1px solid var(--border-ui); overflow-y: auto; }
+        .tree-node { padding: 8px 16px; font-size: 13px; cursor: pointer; display: flex; align-items: center; gap: 10px; border-left: 2px solid transparent; }
+        .tree-node:hover { background: var(--active-bg); }
+        .tree-node.active { background: var(--active-bg); border-left-color: var(--accent); color: #fff; }
+
+        #viewport { flex: 1; display: flex; flex-direction: column; position: relative; background: var(--ui-bg); }
+        .toolbar { height: 40px; background: var(--sidebar-bg); display: flex; align-items: center; justify-content: flex-end; padding: 0 12px; gap: 15px; border-bottom: 1px solid var(--border-ui); }
+        .tool-link { font-size: 12px; color: #8b949e; cursor: pointer; text-decoration: none; display: flex; align-items: center; gap: 5px; }
+        .tool-link:hover { color: var(--accent); }
+
+        pre { margin: 0; padding: 20px; overflow: auto; flex: 1; font-family: var(--f-mono); font-size: 14px; line-height: 1.5; }
+        
+        #status { height: 24px; background: var(--accent); color: #000; font-size: 11px; font-weight: bold; display: flex; align-items: center; padding: 0 15px; }
+        .loading-spin { animation: spin 1s linear infinite; display: none; margin-right: 8px; }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+
+<header>
+    <div style="font-size:14px; font-weight:800; letter-spacing:1px; color:var(--accent)">CORE_INSPECTOR</div>
+    <div class="input-proxy">
+        <input type="text" id="targetUrl" placeholder="Endpoint URL..." value="https://example.com">
+        <button id="execBtn">ANALYZE</button>
+    </div>
+</header>
+
+<main>
+    <div id="sidebar"></div>
+    <div id="viewport">
+        <div class="toolbar">
+            <div class="tool-link" id="fmtBtn"><i class="fas fa-terminal"></i> BEAUTIFY</div>
+            <div class="tool-link" id="copyBtn"><i class="fas fa-copy"></i> COPY</div>
+            <div class="tool-link" id="dlBtn"><i class="fas fa-download"></i> EXPORT</div>
+        </div>
+        <pre><code id="code" class="language-html"></code></pre>
+    </div>
+</main>
+
+<div id="status">
+    <i class="fas fa-circle-notch loading-spin" id="spin"></i>
+    <span id="msg">IDLE</span>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/js-beautify/1.14.7/beautify.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/js-beautify/1.14.7/beautify-css.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/js-beautify/1.14.7/beautify-html.min.js"></script>
+
+<script>
+    class InspectorCore {
+        constructor() {
+            this.files = [];
+            this.current = null;
+            this.ui = {
+                url: document.getElementById('targetUrl'),
+                btn: document.getElementById('execBtn'),
+                side: document.getElementById('sidebar'),
+                code: document.getElementById('code'),
+                msg: document.getElementById('msg'),
+                spin: document.getElementById('spin')
+            };
+            this.bind();
+        }
+
+        bind() {
+            this.ui.btn.onclick = () => this.analyze();
+            document.getElementById('fmtBtn').onclick = () => this.beautify();
+            document.getElementById('copyBtn').onclick = () => this.copy();
+            document.getElementById('dlBtn').onclick = () => this.export();
+        }
+
+        async fetch(url) {
+            const endpoint = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&_=${Date.now()}`;
+            const res = await fetch(endpoint);
+            const data = await res.json();
+            return data.contents;
+        }
+
+        async analyze() {
+            const url = this.ui.url.value;
+            if(!url) return;
+
+            this.updateStatus(true, 'FETCHING_DOM');
+            this.files = [];
+            this.ui.side.innerHTML = '';
+
+            try {
+                const base = new URL(url).href;
+                const html = await this.fetch(base);
+                
+                this.pushFile('index.html', 'html', html);
+                
+                const dom = new DOMParser().parseFromString(html, 'text/html');
+                
+                const tasks = [
+                    ...Array.from(dom.querySelectorAll('script[src]')).map(el => this.reg(el.src, base, 'js')),
+                    ...Array.from(dom.querySelectorAll('link[rel="stylesheet"]')).map(el => this.reg(el.href, base, 'css')),
+                    ...Array.from(dom.querySelectorAll('script:not([src])')).map((el, i) => this.pushFile(`inline-${i}.js`, 'js', el.textContent)),
+                    ...Array.from(dom.querySelectorAll('style')).map((el, i) => this.pushFile(`style-${i}.css`, 'css', el.textContent))
+                ];
+
+                await Promise.all(tasks);
+                this.render();
+                this.select(0);
+                this.updateStatus(false, 'READY');
+            } catch(e) {
+                this.updateStatus(false, 'ERR_CRITICAL');
+            }
+        }
+
+        async reg(path, base, type) {
+            try {
+                const full = new URL(path, base).href;
+                const name = full.split('/').pop().split('?')[0] || `asset.${type}`;
+                this.pushFile(name, type, null, full);
+            } catch(e) {}
+        }
+
+        pushFile(name, type, content, url = null) {
+            this.files.push({ name, type, content, url });
+        }
+
+        render() {
+            this.ui.side.innerHTML = this.files.map((f, i) => `
+                <div class="tree-node" onclick="core.select(${i})" id="fn-${i}">
+                    <i class="fas ${this.getIcon(f.type)}"></i>
+                    ${f.name}
+                </div>
+            `).join('');
+        }
+
+        async select(i) {
+            this.current = this.files[i];
+            document.querySelectorAll('.tree-node').forEach(el => el.classList.remove('active'));
+            document.getElementById(`fn-${i}`).classList.add('active');
+
+            if(!this.current.content) {
+                this.updateStatus(true, `PULLING_${this.current.name}`);
+                this.current.content = await this.fetch(this.current.url);
+            }
+
+            this.ui.code.className = `language-${this.current.type === 'js' ? 'javascript' : this.current.type}`;
+            this.ui.code.textContent = this.current.content;
+            Prism.highlightElement(this.ui.code);
+            this.updateStatus(false, 'READY');
+        }
+
+        beautify() {
+            if(!this.current) return;
+            const cfg = { indent_size: 2 };
+            if(this.current.type === 'js') this.current.content = js_beautify(this.current.content, cfg);
+            if(this.current.type === 'css') this.current.content = css_beautify(this.current.content, cfg);
+            if(this.current.type === 'html') this.current.content = html_beautify(this.current.content, cfg);
+            this.ui.code.textContent = this.current.content;
+            Prism.highlightElement(this.ui.code);
+        }
+
+        copy() {
+            navigator.clipboard.writeText(this.ui.code.textContent);
+            this.updateStatus(false, 'COPIED_TO_CLIPBOARD');
+        }
+
+        export() {
+            const blob = new Blob([this.ui.code.textContent], { type: 'text/plain' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = this.current.name;
+            a.click();
+        }
+
+        getIcon(t) {
+            return t === 'html' ? 'fa-code' : (t === 'js' ? 'fa-scroll' : 'fa-paint-brush');
+        }
+
+        updateStatus(load, txt) {
+            this.ui.spin.style.display = load ? 'inline-block' : 'none';
+            this.ui.msg.textContent = txt;
+        }
+    }
+
+    const core = new InspectorCore();
+</script>
+</body>
+</html>
